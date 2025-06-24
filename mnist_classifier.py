@@ -41,9 +41,9 @@ class ViT(nn.Module):
         # flatten the patch matrix into a vector, also stack together all patches
         b, c, nh, nw, ph, pw = x.shape  #[64,1,4,4,7,7]
         # stack the patches together
-        x = x.reshape(b, c, nh*nw, ph, pw) #[64,1,16,7,7]
+        x = x.reshape(b, nh*nw, ph, pw) #[64,1,16,7,7]
         # flatte each patch into one vector
-        x = x.reshape(b, c, nh*nw, ph*pw)  #[64, 1, 16, 49]
+        x = x.reshape(b, nh*nw, ph*pw)  #[64, 1, 16, 49]
         
         # each flatten patch will be embedded to the embed_dim
         x = self.patch_embedding(x)
@@ -59,7 +59,7 @@ class ViT(nn.Module):
         x = self.transformer_encoder(x)
 
         # only select the hidden vector of the CLS token for making the prediction
-        x = x[0,:]
+        x = x[:,0]
 
         # go throught the finnal fc layer for the classification task
         x = self.fc(x)
@@ -67,7 +67,7 @@ class ViT(nn.Module):
         return x
 
 
-def patchify(batch_data,patch_size):
+def patchify(batch_data, patch_size):
     """
     patchify the batch of images
     """
@@ -155,7 +155,7 @@ def main():
     # set all hyper-parameters
     batch_size = 128
     lr = 3e-4
-    num_epochs = 15
+    num_epochs = 30
     img_width = 28
     img_channels = 1
     num_classes = 10
@@ -199,9 +199,9 @@ def main():
     # Training loop
     print('Starting training...')
     for epoch in range(num_epochs):
-        print(f'\nEpoch {epoch + 1}/5')
-        train_model(model, train_loader, criterion, optimizer, device)
-        evaluate_model(model, test_loader, device)
+        print(f'\nEpoch {epoch + 1}/{num_epochs}')
+        train_model(model, train_loader, criterion, optimizer, device, patch_size)
+        evaluate_model(model, test_loader, device, patch_size)
 
     # Save the trained model
     torch.save(model.state_dict(), 'mnist_model.pth')
