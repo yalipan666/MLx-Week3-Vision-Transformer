@@ -9,8 +9,9 @@ from prepare_dataset import Combine
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
-# Define the neural network architecture
-class ViT(nn.Module):
+
+# Define the encoder architecture
+class Encoder(nn.Module):
     def __init__(self,img_width,img_channels,patch_size,embed_dim,num_heads,num_layers,num_classes,ff_dim,drop_rate):
         super().__init__() #call the parent class's __init__
         # get the CLS which "summerize" the information of the whole sequence
@@ -34,11 +35,11 @@ class ViT(nn.Module):
     # define the forward module (i.e., the information flow)
     def forward(self,x):
         # flatten the patch matrix into a vector, also stack together all patches
-        b, c, nh, nw, ph, pw = x.shape  #[64,1,4,4,7,7]
-        # stack the patches together
-        x = x.reshape(b, nh*nw, ph, pw) #[64,16,7,7]
+        
+        ### full-transformer
+        b, np, ph, pw = x.shape  #[128,16,14,14]
         # flatte each patch into one vector
-        x = x.reshape(b, nh*nw, ph*pw)  #[64, 16, 49]
+        x = x.reshape(b, np, ph*pw)  #[128, 16, 196]
         
         # each flatten patch will be embedded to the embed_dim
         pch = self.emb(x)
@@ -51,31 +52,44 @@ class ViT(nn.Module):
         hdn = hdn + self.pos(self.rng)
 
         # go into the transformer attention blocks
-        for enc in self.enc: hdn = enc(hdn)
+        for enc in self.enc: hdn,key,val = enc(hdn)  # the key and val of the encoder goes into the decoder
 
-        # only select the hidden vector of the CLS token for making the prediction
-        out = hdn[:,0,:]
+        # # this section is only useful for the classification task
+        # # only select the hidden vector of the CLS token for making the prediction
+        # out = hdn[:,0,:]
+        # # go throught the finnal fc layer for the classification task
+        # out = self.fin(out)
 
-        # go throught the finnal fc layer for the classification task
-        return self.fin(out)
+        return key, val
 
 class EncoderLayer(nn.Module):
     def __init__(self,dim,drop_rate):
         super().__init__()
         self.att = Attention(dim,drop_rate)
-        self.ffn = FFN(dim,drop_rate)
         self.ini = nn.LayerNorm(dim)
+        self.ffn = FFN(dim,drop_rate)
         self.fin = nn.LayerNorm(dim)
 
     def forward(self,src):
         # the skip connections in the residual block (residual:the diff between the input and the output-->the delta)
-        out = self.att(src)
+        out,key,val = self.att(src)
         src = src + out
         src = self.ini(src)
         out = self.ffn(src)
         src = src + out
         src = self.fin(src)
-        return src
+        return src,key,val
+
+
+class Decoder(nn.Module):
+    def __init__(self, key, val):
+        super().__init__()
+        #
+        #
+        
+
+
+
 
 
 class FFN(nn.Module):
@@ -95,10 +109,12 @@ class FFN(nn.Module):
         return x
 
 
-class Attention(nn.Module):
-    def __init__(self,dim,drop_rate):
+class Attention(nn.Module): #MultiHeadAttention
+    def __init__(self,dim,num_heads,drop_rate):
         super().__init__()
-        self.dim = dim
+        assert dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
         self.v_proj = nn.Linear(dim, dim)
@@ -106,14 +122,23 @@ class Attention(nn.Module):
         self.drpout = nn.Dropout(drop_rate)
 
     def forward(self,x):
-        qry = self.q_proj(x)
-        key = self.k_proj(x)
-        val = self.v_proj(x)
-        att = qry @ key.transpose(-2,-1) * self.dim ** -0.5
+        B, N, C = x.shape #(batch, seq_len, embed_dim)
+        # project and split into heads
+        qry = self.q_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1,2) #(B, num_heads, N, head_dim)
+        key = self.k_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1,2) 
+        val = self.v_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(1,2) 
+        # scaled dot-product attention
+        att = (qry @ key.transpose(-2,-1) / self.head_dim ** 0.5)
         att = torch.softmax(att, dim=-1)
         att = self.drpout(att)
-        out = torch.matmul(att,val)
-        return self.o_proj(out)
+        out = torch.matmul(att,val) #(B, num_heads, N, head_dim)
+        # concatenate heads
+        out = out.transpose(1,2).reshape(B, N, C) # (B, N, embed_dim)
+        out = self.o_proj(out)
+        # concatenate k and v
+        key = key.transpose(1,2).reshape(B, N, C)
+        val = val.transpose(1,2).reshape(B, N, C)
+        return out, key, val
 
 
 def patchify(batch_data, patch_size):
@@ -138,12 +163,13 @@ def train_model(model, train_loader, criterion, optimizer, device, patch_size):
     correct = 0
     total = 0
     
-    for batch_idx, (data, target) in enumerate(train_loader):
+    for batch_idx, combine_data in enumerate(train_loader):
 
         # ### try to get one data exaple
         # data_iter = iter(train_loader)
         # data,target = next(data_iter)
-
+        data = combine_data[1] #[128, 16, 14, 14]
+        target = combine_data[2] #[s, digit_1, digit_2, digit_3, digit_4, e]
         data, target = data.to(device), target.to(device)
         # data.shape = [64, 1, 28, 28] #tensor: [batch_size,channels,height,width]
         # target is a tensor of shape [64]
@@ -153,8 +179,8 @@ def train_model(model, train_loader, criterion, optimizer, device, patch_size):
         # plt.imshow(img, cmap='gray')
         # plt.show()
         
-        # patchify the image into a grid (in order to implement vision transformer)
-        data = patchify(data,patch_size) #[64,1,4,4,7,7]
+        ## patchify the image into a grid (in order to implement vision transformer)
+        # data = patchify(data,patch_size) #[64,1,4,4,7,7]
         # ### try to check on the pathify
         # img_patches = patches[0,0]
         # fig,axes = plt.subplots(4,4,figsize=(7,7))
@@ -187,10 +213,12 @@ def evaluate_model(model, test_loader, device, patch_size):
     total = 0
     
     with torch.no_grad():
-        for data, target in test_loader:
+        for combine_data in test_loader:
+            data = combine_data[1]
+            target = combine_data[2]
             data, target = data.to(device), target.to(device)
-            # patchify the image into a grid (in order to implement vision transformer)
-            data = patchify(data,patch_size) #[64,1,4,4,7,7]
+            # # patchify the image into a grid (in order to implement vision transformer)
+            # data = patchify(data,patch_size) #[64,1,4,4,7,7]
             output = model(data)
             _, predicted = output.max(1)
             total += target.size(0)
@@ -208,7 +236,7 @@ def main():
     img_width = 28
     img_channels = 1
     num_classes = 10
-    patch_size = 7
+    patch_size = 14
     embed_dim = 64
     ff_dim = 2048
     num_heads = 8
@@ -264,8 +292,8 @@ def main():
         evaluate_model(model, test_loader, device, patch_size)
 
     # Save the trained model
-    torch.save(model.state_dict(), 'mnist_model.pth')
-    print('Model saved to mnist_model.pth')
+    torch.save(model.state_dict(), 'mnist_transformer_model.pth')
+    print('Model saved to mnist_transformer_model.pth')
 
 if __name__ == '__main__':
     main() 
