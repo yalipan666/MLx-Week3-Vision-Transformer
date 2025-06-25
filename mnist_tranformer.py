@@ -11,9 +11,10 @@ from prepare_dataset import Combine
 torch.manual_seed(42)
 
 # Define the encoder architecture
-class Encoder(nn.Module):
-    def __init__(self,img_width,img_channels,patch_size,embed_dim,num_heads,num_layers,num_classes,ff_dim,drop_rate):
+class ViT(nn.Module):
+    def __init__(self,img_width,img_channels,patch_size,embed_dim,num_heads,num_layers,num_classes,ff_dim,drop_rate,n_digit):
         super().__init__() #call the parent class's __init__
+        ##### building the encoder
         # get the CLS which "summerize" the information of the whole sequence
         # the use of nn.Parameter here will garantee a correct backpop and update parameters
         self.cls = nn.Parameter(torch.randn(1,1,embed_dim))
@@ -32,8 +33,20 @@ class Encoder(nn.Module):
             nn.Linear(embed_dim, num_classes)
         )
     
+        #### building the decoder
+        self.emb_output = nn.Embedding(num_classes+2,embed_dim)
+        self.pos_output = nn.Embedding(n_digit+2,embed_dim)
+        self.register_buffer('rng_output',torch.arange(n_digit+2))
+        self.dec = nn.ModuleList([DecoderLayer(embed_dim,drop_rate) for _ in range (num_layers)])
+        self.fin_output = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, num_classes)
+        )
+        
+
+
     # define the forward module (i.e., the information flow)
-    def forward(self,x):
+    def forward(self, x, y):
         # flatten the patch matrix into a vector, also stack together all patches
         
         ### full-transformer
@@ -49,10 +62,10 @@ class Encoder(nn.Module):
         hdn = torch.cat([cls, pch], dim=1)
 
         # add the position embeddings, which are learnable parameters
-        hdn = hdn + self.pos(self.rng)
+        hdn = hdn + self.pos(self.rng) # "broadcast" the positional encoding across the batch dimension.
 
-        # go into the transformer attention blocks
-        for enc in self.enc: hdn,key,val = enc(hdn)  # the key and val of the encoder goes into the decoder
+        # go into the transformer attention blocks --- the encoder
+        for enc in self.enc: hdn = enc(hdn)  # the key and val of the encoder goes into the decoder
 
         # # this section is only useful for the classification task
         # # only select the hidden vector of the CLS token for making the prediction
@@ -60,7 +73,18 @@ class Encoder(nn.Module):
         # # go throught the finnal fc layer for the classification task
         # out = self.fin(out)
 
-        return key, val
+        ##### build the decoder, using y(i.e.,target), a list of 6 elements [start,digit1,digit2,digit3,digit4,end]
+        out_emb = self.emb_output(y) #[batch, seq_len, embed_dim]
+        out_emd = out_emd + self.pos_output(self.rng_output)
+        tgt_mask = generate_mask(out_emb.size(1))
+        for dec in self.dec: tgt = dec(out_emd, memory=hdn, tgt_mask=tgt_mask)
+        # memory indicates the output from the encoder layer, which will be projected by the decoder's 
+        # cross-attention layer into keys and values as needed
+        
+        # get the finnal prediction
+        logits = self.fin_output(tgt)
+        out = torch.softmax(logits, dim=-1)
+        return out
 
 class EncoderLayer(nn.Module):
     def __init__(self,dim,drop_rate):
@@ -78,15 +102,32 @@ class EncoderLayer(nn.Module):
         out = self.ffn(src)
         src = src + out
         src = self.fin(src)
-        return src,key,val
+        return src
 
-
-class Decoder(nn.Module):
-    def __init__(self, key, val):
+class DecoderLayer(nn.Module):
+    def __init__(self, embed_dim, num_heads, drop_rate):
         super().__init__()
-        #
-        #
-        
+        self.self_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=drop_rate, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=drop_rate, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ffn = FFN(embed_dim, drop_rate)
+        self.norm3 = nn.LayerNorm(embed_dim)
+
+    def forward(self,tgt, memory, tgt_mask=None, memory_mask=NOne):
+        # masked self-attention
+        tgt2,_ = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)
+        tgt = tgt + tgt2
+        tgt = self.norm1(tgt)
+        # cross attention between encoder and decoder
+        tgt2,_ = self.cross_attn(tgt, memory, memory, attn_mask=memory_mask)
+        tgt = tgt + tgt2
+        tgt = self.norm2(tgt)
+        # feed-forward
+        tgt2 = self.ffn(tgt)
+        tgt = tgt + tgt2
+        tgt = self.norm3(tgt)
+        return tgt
 
 
 
@@ -156,6 +197,12 @@ def patchify(batch_data, patch_size):
     # flatten the pixels in each patch
     return batch_patches
 
+def generate_mask(sz):
+    # generate a (sz,sz) mask (upper triangle) with -inf above the diagonal, 0 elsewhere
+    mask = torch.triu(torch.ones(sz, sz), diagonal=1)
+    mask = mask.masked_fill(mask == 1, float('-inf'))
+    return mask
+
 
 def train_model(model, train_loader, criterion, optimizer, device, patch_size):
     model.train()
@@ -191,7 +238,7 @@ def train_model(model, train_loader, criterion, optimizer, device, patch_size):
         # plt.show()
 
         optimizer.zero_grad()
-        output = model(data)
+        output = model(data,target)
         loss = criterion(output, target)
         loss.backward()
         optimizer.step()
@@ -229,6 +276,10 @@ def evaluate_model(model, test_loader, device, patch_size):
     return accuracy
 
 def main():
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Using device: {device}')
+
     # set all hyper-parameters
     batch_size = 128
     lr = 3e-4
@@ -243,11 +294,9 @@ def main():
     num_layers = 3
     weight_decay = 1e-4
     drop_rate = 0.1
+    n_digit = 4 # numer of digits in each image
 
-    # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
-
+    
 
 
     # ### load in the original MNIST dataset, where each image contains one digit
@@ -279,7 +328,8 @@ def main():
         num_classes = num_classes,
         num_layers = num_layers,
         ff_dim = ff_dim,
-        drop_rate = drop_rate
+        drop_rate = drop_rate,
+        n_digit = n_digit
     ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr = lr, weight_decay = weight_decay)
