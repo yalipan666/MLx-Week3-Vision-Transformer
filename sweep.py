@@ -9,48 +9,44 @@ It provides more control over the sweep process compared to the CLI-based approa
 import wandb
 import os
 
-from model.model import TrainingHyperparameters
-from train import train_model
-from model import ModelHyperparameters
+from mnist_transformer import TrainingHyperparameters
+from mnist_transformer import ModelHyperparameters
+from mnist_transformer import train_model
 
 # Sweep configuration - equivalent to wandb_sweep.yaml but in Python
 SWEEP_CONFIG = {
-    'method': 'random',  # Can be 'grid', 'random', or 'bayes'
+    'method': 'bayes',  # Can be 'grid', 'random', or 'bayes'
     'metric': {
         'name': 'test_loss',
         'goal': 'minimize'
     },
     'parameters': {
         'batch_size': {
-            'values': [1024]
+            'values': [64 128]
         },
-        'freeze_embeddings': {
-            'values': [True, False]
-        },
-        'include_batch_norms': {
-            'values': [True, False]
-        },
+        'num_epochs':{
+            'values': [5,10,20,30]
+        }
+        'num_heads':{
+            'values': [4,8,16]
+        }
+        'num_layers':{
+            'values': [2,4,8]
+        }
         'learning_rate': {
-            'min': 0.001,
-            'max': 0.03,
-            'distribution': 'log_uniform_values'
+            'min': 1e-5,
+            'max': 1e-2,
+            'distribution': 'log_uniform'
         },
-        'dropout': {
+        'weight_decay':{
+            'min': 1e-6,
+            'max': 1e-2,
+            'distribution': 'log_uniform'
+        }
+        'drop_rate': {
             'min': 0.1,
             'max': 0.5,
             'distribution': 'uniform'
-        },
-        'hidden_dim_1': {
-            'values': [64, 128, 256, 512]
-        },
-        'hidden_dim_2': {
-            'values': [64, 128, 256, 512]
-        },
-        'hidden_dim_3': {
-            'values': [32, 64, 128, 256, 512]
-        },
-        'epochs': {
-            'values': [2, 4]
         }
     }
 }

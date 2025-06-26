@@ -5,48 +5,71 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 from prepare_dataset import Combine
+from dataclasses import dataclass
 
 
 # Set random seed for reproducibility
 torch.manual_seed(42)
 
+# pre-set all the relevant parameters
+@dataclass
+class TrainingHyperparameters:
+    batch_size: int = 128
+    num_epochs: int = 3
+    learning_rate: float = 3e-4
+    weight_decay: float = 1e-4
+    drop_rate: float = 0.1
+
+@dataclass
+class ModelHyperparameters:
+    img_width: int = 56
+    img_channels: int = 1
+    num_classes: int = 10
+    patch_size: int = 14
+    embed_dim: int = 64
+    ff_dim: int = 2048
+    num_heads: int = 8
+    num_layers: int = 3
+    n_digit: int = 4
+
 # Define the encoder architecture
 class ViT(nn.Module):
-    def __init__(self,img_width,img_channels,patch_size,embed_dim,num_heads,num_layers,num_classes,ff_dim,drop_rate,n_digit):
+    def __init__(self, model_cfg: ModelHyperparameters, train_cfg: TrainingHyperparameters):
         super().__init__() #call the parent class's __init__
         ##### building the encoder
         # get the CLS which "summerize" the information of the whole sequence
         # the use of nn.Parameter here will garantee a correct backpop and update parameters
-        self.cls = nn.Parameter(torch.randn(1,1,embed_dim))
+        self.cls = nn.Parameter(torch.randn(1,1,model_cfg.embed_dim))
         # get the embedding layer
-        self.emb = nn.Linear(img_channels*patch_size*patch_size,embed_dim) #will do the broadcast to the data tensor, so the input and output dim don't need to be matched
+        self.emb = nn.Linear(model_cfg.img_channels*model_cfg.patch_size*model_cfg.patch_size, model_cfg.embed_dim) #will do the broadcast to the data tensor, so the input and output dim don't need to be matched
         # get the positional encoding [including the patch_embeddings plus 1--the cls token]
-        self.pos = nn.Embedding((img_width//patch_size)*(img_width//patch_size)+1,embed_dim)
+        num_patches = (model_cfg.img_width // model_cfg.patch_size) * (model_cfg.img_width // model_cfg.patch_size)
+        self.pos = nn.Embedding(num_patches + 1, model_cfg.embed_dim)
         # only register the parameters
-        self.register_buffer('rng',torch.arange((img_width//patch_size)*(img_width//patch_size)+1))
+        self.register_buffer('rng', torch.arange(num_patches + 1))
         # build the encoder, first define the encoder_layer, then just stack them together num_layers times
         # the use of mudulelist here will garantee a correct backpop and update parameters
-        self.enc = nn.ModuleList([EncoderLayer(embed_dim, num_heads,drop_rate) for _ in range(num_layers)])
+        self.enc = nn.ModuleList([EncoderLayer(model_cfg.embed_dim, model_cfg.num_heads, train_cfg.drop_rate) for _ in range(model_cfg.num_layers)])
         # define the finnal output layer in the model
         self.fin = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, num_classes)
+            nn.LayerNorm(model_cfg.embed_dim),
+            nn.Linear(model_cfg.embed_dim, model_cfg.num_classes)
         )
     
         #### building the decoder
         # +2 for start and end tokens
-        self.emb_output = nn.Embedding(num_classes+2,embed_dim)
-        self.pos_output = nn.Embedding(n_digit+2,embed_dim)
-        self.register_buffer('rng_output',torch.arange(n_digit+2))
-        self.dec = nn.ModuleList([DecoderLayer(embed_dim, num_heads, drop_rate) for _ in range (num_layers)])
+        self.emb_output = nn.Embedding(model_cfg.num_classes+2, model_cfg.embed_dim)
+        self.pos_output = nn.Embedding(model_cfg.n_digit+2, model_cfg.embed_dim)
+        self.register_buffer('rng_output', torch.arange(model_cfg.n_digit+2))
+        self.dec = nn.ModuleList([DecoderLayer(model_cfg.embed_dim, model_cfg.num_heads, train_cfg.drop_rate) for _ in range(model_cfg.num_layers)])
         self.fin_output = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, num_classes+2) # output logits for all digits + start + end
+            nn.LayerNorm(model_cfg.embed_dim),
+            nn.Linear(model_cfg.embed_dim, model_cfg.num_classes+2)
         )
-        self.n_digit = n_digit
-        self.num_classes = num_classes
-        self.start_token = num_classes      # convention: start token index
-        self.end_token = num_classes + 1    # convention: end token index
+        self.n_digit = model_cfg.n_digit
+        self.num_classes = model_cfg.num_classes
+        self.start_token = model_cfg.num_classes
+        self.end_token = model_cfg.num_classes + 1
 
     def forward(self, x, y):
         # flatten the patch matrix into a vector, also stack together all patches
@@ -254,7 +277,7 @@ def generate_mask(sz):
     return mask
 
 
-def train_model(model, train_loader, criterion, optimizer, device, patch_size):
+def train_model(model, train_loader, criterion, optimizer, device):
     model.train()
     running_loss = 0.0
     total_tokens = 0
@@ -305,7 +328,7 @@ def train_model(model, train_loader, criterion, optimizer, device, patch_size):
             correct_tokens = 0
             total_tokens = 0
 
-def evaluate_model(model, test_loader, device, patch_size):
+def evaluate_model(model, test_loader, device):
     model.eval()
     total_seqs = 0
     correct_seqs = 0
@@ -340,23 +363,6 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
 
-    # set all hyper-parameters
-    batch_size = 128
-    lr = 3e-4
-    num_epochs = 3
-    img_width = 56
-    img_channels = 1
-    num_classes = 10
-    patch_size = 14
-    embed_dim = 64
-    ff_dim = 2048
-    num_heads = 8
-    num_layers = 3
-    weight_decay = 1e-4
-    drop_rate = 0.1
-    n_digit = 4 # numer of digits in each image
-
-
     # ### load in the original MNIST dataset, where each image contains one digit
     # # Load and preprocess data
     # transform = transforms.Compose([
@@ -368,36 +374,33 @@ def main():
     # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     # test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 
+    # loadin the config
+    train_cfg = TrainingHyperparameters()
+    model_cfg = ModelHyperparameters()
 
     # ### load in the customed dataset, where each image contains 4 digits in 4 quarants
     train_dataset = Combine(train=True)
     test_dataset = Combine(train=False)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 
+    # get the image dimension
+    tmp = next(iter(train_dataset))
+    model_cfg.img_width = tmp[0].shape[0]
+    model_cfg.img_channels = 1
+    model_cfg.patch_size = tmp[1].shape[1]
 
     # Initialize model, loss function, and optimizer
-    model = ViT(
-        img_width = img_width,
-        img_channels = img_channels,
-        patch_size = patch_size, 
-        embed_dim = embed_dim,
-        num_heads = num_heads,
-        num_classes = num_classes,
-        num_layers = num_layers,
-        ff_dim = ff_dim,
-        drop_rate = drop_rate,
-        n_digit = n_digit
-    ).to(device)
+    model = ViT(model_cfg, train_cfg).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr = lr, weight_decay = weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
 
     # Training loop
     print('Starting training...')
-    for epoch in range(num_epochs):
-        print(f'\nEpoch {epoch + 1}/{num_epochs}')
-        train_model(model, train_loader, criterion, optimizer, device, patch_size)
-        evaluate_model(model, test_loader, device, patch_size)
+    for epoch in range(train_cfg.num_epochs):
+        print(f'\nEpoch {epoch + 1}/{train_cfg.num_epochs}')
+        train_model(model, train_loader, criterion, optimizer, device)
+        evaluate_model(model, test_loader, device)
 
     # Save the trained model
     torch.save(model.state_dict(), 'mnist_transformer_model.pth')
