@@ -353,8 +353,8 @@ def evaluate_model(model, test_loader, device):
             # Sequence-level accuracy (all tokens must match)
             correct_seqs += ((pred_trim == target_trim).all(dim=1)).sum().item()
             total_seqs += target_seq.size(0)
-    token_acc = 100. * correct_tokens / total_tokens
-    seq_acc = 100. * correct_seqs / total_seqs
+    token_acc = 100. * correct_tokens / total_tokens if total_tokens>0 else 0.0
+    seq_acc = 100. * correct_seqs / total_seqs if total_seqs>0 else 0.0
     print(f'Test Token Accuracy: {token_acc:.2f}%, Sequence Accuracy: {seq_acc:.2f}%')
     return seq_acc
 

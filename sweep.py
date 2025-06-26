@@ -22,25 +22,25 @@ SWEEP_CONFIG = {
     },
     'parameters': {
         'batch_size': {
-            'values': [64,128]
+            'values': [128]
         },
         'num_epochs':{
-            'values': [10,20,40]
+            'values': [10]
         },
         'num_heads':{
-            'values': [4,8,16]
+            'values': [2,4,8]
         },
         'num_layers':{
-            'values': [2,4,8]
+            'values': [2,4,6]
         },
         'learning_rate': {
             'min': 1e-5,
-            'max': 1e-2,
+            'max': 1e-3,
             'distribution': 'log_uniform'
         },
         'weight_decay':{
             'min': 1e-6,
-            'max': 1e-2,
+            'max': 1e-3,
             'distribution': 'log_uniform'
         },
         'drop_rate': {
