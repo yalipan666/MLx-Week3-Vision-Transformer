@@ -26,7 +26,7 @@ class ViT(nn.Module):
         self.register_buffer('rng',torch.arange((img_width//patch_size)*(img_width//patch_size)+1))
         # build the encoder, first define the encoder_layer, then just stack them together num_layers times
         # the use of mudulelist here will garantee a correct backpop and update parameters
-        self.enc = nn.ModuleList([EncoderLayer(embed_dim,drop_rate) for _ in range(num_layers)])
+        self.enc = nn.ModuleList([EncoderLayer(embed_dim, num_heads,drop_rate) for _ in range(num_layers)])
         # define the finnal output layer in the model
         self.fin = nn.Sequential(
             nn.LayerNorm(embed_dim),
@@ -34,18 +34,20 @@ class ViT(nn.Module):
         )
     
         #### building the decoder
+        # +2 for start and end tokens
         self.emb_output = nn.Embedding(num_classes+2,embed_dim)
         self.pos_output = nn.Embedding(n_digit+2,embed_dim)
         self.register_buffer('rng_output',torch.arange(n_digit+2))
-        self.dec = nn.ModuleList([DecoderLayer(embed_dim,drop_rate) for _ in range (num_layers)])
+        self.dec = nn.ModuleList([DecoderLayer(embed_dim, num_heads, drop_rate) for _ in range (num_layers)])
         self.fin_output = nn.Sequential(
             nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, num_classes)
+            nn.Linear(embed_dim, num_classes+2) # output logits for all digits + start + end
         )
-        
+        self.n_digit = n_digit
+        self.num_classes = num_classes
+        self.start_token = num_classes      # convention: start token index
+        self.end_token = num_classes + 1    # convention: end token index
 
-
-    # define the forward module (i.e., the information flow)
     def forward(self, x, y):
         # flatten the patch matrix into a vector, also stack together all patches
         
@@ -60,24 +62,23 @@ class ViT(nn.Module):
         # pre-pend the CLS ("secretory") token in front of the embedding
         cls = self.cls.expand(b,-1,-1) #CLS token for the whole batch
         hdn = torch.cat([cls, pch], dim=1)
-
+        
         # add the position embeddings, which are learnable parameters
-        hdn = hdn + self.pos(self.rng) # "broadcast" the positional encoding across the batch dimension.
-
+        hdn = hdn + self.pos(torch.arange(hdn.size(1), device=hdn.device)) # "broadcast" the positional encoding across the batch dimension.
         # go into the transformer attention blocks --- the encoder
         for enc in self.enc: hdn = enc(hdn)  # the key and val of the encoder goes into the decoder
-
         # # this section is only useful for the classification task
         # # only select the hidden vector of the CLS token for making the prediction
         # out = hdn[:,0,:]
         # # go throught the finnal fc layer for the classification task
         # out = self.fin(out)
-
         ##### build the decoder, using y(i.e.,target), a list of 6 elements [start,digit1,digit2,digit3,digit4,end]
+    
         out_emb = self.emb_output(y) #[batch, seq_len, embed_dim]
-        out_emd = out_emd + self.pos_output(self.rng_output)
-        tgt_mask = generate_mask(out_emb.size(1))
-        for dec in self.dec: tgt = dec(out_emd, memory=hdn, tgt_mask=tgt_mask)
+        out_emb = out_emb + self.pos_output(self.rng_output[:out_emb.size(1)])
+        tgt_mask = generate_mask(out_emb.size(1)).to(x.device)
+        tgt = out_emb
+        for dec in self.dec: tgt = dec(tgt, memory=hdn, tgt_mask=tgt_mask)
         # memory indicates the output from the encoder layer, which will be projected by the decoder's 
         # cross-attention layer into keys and values as needed
         
@@ -86,17 +87,70 @@ class ViT(nn.Module):
         out = torch.softmax(logits, dim=-1)
         return out
 
+    # build the generation task where the model predict the token/digit one by one
+    def autoregressive_inference(self, x, device, max_digits=None): 
+        # patchify and encode the image
+        # x: [batch, np, ph, pw]
+        b, np, ph, pw = x.shape
+        x = x.reshape(b, np, ph*pw)
+        pch = self.emb(x)
+        cls = self.cls.expand(b,-1,-1)
+        hdn = torch.cat([cls, pch], dim=1)
+        hdn = hdn + self.pos(self.rng)
+        for enc in self.enc: hdn = enc(hdn)
+        # Initialize the output sequence, start with [start_token]
+        max_steps = max_digits if max_digits is not None else self.n_digit + 2
+        y = torch.full((b, 1), self.start_token, dtype=torch.long, device=device) # the "have been seen" tokens
+        outputs = []
+        finished = torch.zeros(b, dtype=torch.bool, device=device)
+        for step in range(max_steps):
+            out_emb = self.emb_output(y)
+            out_emb = out_emb + self.pos_output(self.rng_output[:out_emb.size(1)])
+            tgt_mask = generate_mask(out_emb.size(1)).to(x.device) # the mask is auto-adjusted to how many y you have here
+            tgt = out_emb
+            for dec in self.dec: # go throught the loop of the decoder layers
+                tgt = dec(tgt, memory=hdn, tgt_mask=tgt_mask)
+            logits = self.fin_output(tgt)  # [b, cur_seq, num_classes]
+            next_token_logits = logits[:, -1, :]  # [b, num_classes]
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # [b, 1] Returns the indices of the maximum value of all elements in the input tensor.
+            # If already finished, keep predicting end_token
+            next_token[finished.unsqueeze(1)] = self.end_token
+            y = torch.cat([y, next_token], dim=1)
+            outputs.append(next_token)
+            # Update finished mask
+            finished = finished | (next_token.squeeze(1) == self.end_token)
+            # If all finished, break
+            if finished.all():
+                break
+        # Stack outputs, remove start token, and trim at end_token for each sample
+        outputs = torch.cat(outputs, dim=1)  # [b, <=max_steps]
+        # Remove tokens after end_token for each sample
+        result = []
+        for i in range(b):
+            out = outputs[i]
+            if (out == self.end_token).any():
+                idx = (out == self.end_token).nonzero(as_tuple=True)[0][0]
+                result.append(out[:idx].cpu())
+            else:
+                result.append(out.cpu())
+        # Pad to max length in batch
+        maxlen = max([r.size(0) for r in result])
+        result_padded = torch.full((b, maxlen), self.end_token, dtype=torch.long) #long: only integers no decimals
+        for i, r in enumerate(result):
+            result_padded[i, :r.size(0)] = r
+        return result_padded.to(device)
+
 class EncoderLayer(nn.Module):
-    def __init__(self,dim,drop_rate):
+    def __init__(self,dim,num_heads,drop_rate):
         super().__init__()
-        self.att = Attention(dim,drop_rate)
+        self.att = Attention(dim,num_heads,drop_rate)
         self.ini = nn.LayerNorm(dim)
         self.ffn = FFN(dim,drop_rate)
         self.fin = nn.LayerNorm(dim)
 
     def forward(self,src):
         # the skip connections in the residual block (residual:the diff between the input and the output-->the delta)
-        out,key,val = self.att(src)
+        out = self.att(src)
         src = src + out
         src = self.ini(src)
         out = self.ffn(src)
@@ -114,7 +168,7 @@ class DecoderLayer(nn.Module):
         self.ffn = FFN(embed_dim, drop_rate)
         self.norm3 = nn.LayerNorm(embed_dim)
 
-    def forward(self,tgt, memory, tgt_mask=None, memory_mask=NOne):
+    def forward(self,tgt, memory, tgt_mask=None, memory_mask=None):
         # masked self-attention
         tgt2,_ = self.self_attn(tgt, tgt, tgt, attn_mask=tgt_mask)
         tgt = tgt + tgt2
@@ -128,10 +182,6 @@ class DecoderLayer(nn.Module):
         tgt = tgt + tgt2
         tgt = self.norm3(tgt)
         return tgt
-
-
-
-
 
 class FFN(nn.Module):
     def __init__(self,dim,drop_rate):
@@ -179,7 +229,7 @@ class Attention(nn.Module): #MultiHeadAttention
         # concatenate k and v
         key = key.transpose(1,2).reshape(B, N, C)
         val = val.transpose(1,2).reshape(B, N, C)
-        return out, key, val
+        return out
 
 
 def patchify(batch_data, patch_size):
@@ -207,20 +257,19 @@ def generate_mask(sz):
 def train_model(model, train_loader, criterion, optimizer, device, patch_size):
     model.train()
     running_loss = 0.0
-    correct = 0
-    total = 0
-    
+    total_tokens = 0
+    correct_tokens = 0
     for batch_idx, combine_data in enumerate(train_loader):
-
         # ### try to get one data exaple
         # data_iter = iter(train_loader)
         # data,target = next(data_iter)
-        data = combine_data[1] #[128, 16, 14, 14]
-        target = combine_data[2] #[s, digit_1, digit_2, digit_3, digit_4, e]
+        data = combine_data[1]  # [batch, np, ph, pw]
+        target = combine_data[2]  # [batch, seq_len] (with start and end tokens)
         data, target = data.to(device), target.to(device)
         # data.shape = [64, 1, 28, 28] #tensor: [batch_size,channels,height,width]
         # target is a tensor of shape [64]
-        
+        input_seq = target[:,:-1]
+        target_seq = target[:,1:] # shift towards right by one token
         # ### try to plot a random image to have a peek
         # img = data[0].cpu().squeeze()
         # plt.imshow(img, cmap='gray')
@@ -235,45 +284,56 @@ def train_model(model, train_loader, criterion, optimizer, device, patch_size):
         #     for j in range(4):
         #         axes[i,j].imshow(img_patches[i,j],cmap='gray')
         #         axes[i,j].axis('off')
-        # plt.show()
-
+        # plt.show() 
+        
         optimizer.zero_grad()
-        output = model(data,target)
-        loss = criterion(output, target)
+        output = model(data, input_seq)  # output: [batch, seq_len, vocab_size]
+        # Reshape for loss: flatten batch and seq
+        output = output.reshape(-1, output.size(-1))
+        target_seq = target_seq.reshape(-1)
+        loss = criterion(output, target_seq)
         loss.backward()
         optimizer.step()
-        
         running_loss += loss.item()
-        _, predicted = output.max(1)
-        total += target.size(0)
-        correct += predicted.eq(target).sum().item()
-        
+        # Token-level accuracy
+        pred_tokens = output.argmax(dim=-1)
+        correct_tokens += (pred_tokens == target_seq).sum().item()
+        total_tokens += target_seq.numel()
         if batch_idx % 100 == 99:
-            print(f'Batch: {batch_idx + 1}, Loss: {running_loss/100:.3f}, '
-                  f'Accuracy: {100.*correct/total:.2f}%')
+            print(f'Batch: {batch_idx + 1}, Loss: {running_loss/100:.3f}, Token Accuracy: {100.*correct_tokens/total_tokens:.2f}%')
             running_loss = 0.0
-
+            correct_tokens = 0
+            total_tokens = 0
 
 def evaluate_model(model, test_loader, device, patch_size):
     model.eval()
-    correct = 0
-    total = 0
-    
+    total_seqs = 0
+    correct_seqs = 0
+    total_tokens = 0
+    correct_tokens = 0
     with torch.no_grad():
         for combine_data in test_loader:
             data = combine_data[1]
             target = combine_data[2]
             data, target = data.to(device), target.to(device)
-            # # patchify the image into a grid (in order to implement vision transformer)
-            # data = patchify(data,patch_size) #[64,1,4,4,7,7]
-            output = model(data)
-            _, predicted = output.max(1)
-            total += target.size(0)
-            correct += predicted.eq(target).sum().item()
-    
-    accuracy = 100. * correct / total
-    print(f'Test Accuracy: {accuracy:.2f}%')
-    return accuracy
+            # Remove start token for comparison
+            target_seq = target[:, 1:]
+            # Generate predictions
+            pred_seq = model.autoregressive_inference(data, device, max_digits=target_seq.size(1))
+            # Pad to same length for comparison
+            min_len = min(target_seq.size(1), pred_seq.size(1))
+            target_trim = target_seq[:, :min_len]
+            pred_trim = pred_seq[:, :min_len]
+            # Token-level accuracy
+            correct_tokens += (pred_trim == target_trim).sum().item()
+            total_tokens += target_trim.numel()
+            # Sequence-level accuracy (all tokens must match)
+            correct_seqs += ((pred_trim == target_trim).all(dim=1)).sum().item()
+            total_seqs += target_seq.size(0)
+    token_acc = 100. * correct_tokens / total_tokens
+    seq_acc = 100. * correct_seqs / total_seqs
+    print(f'Test Token Accuracy: {token_acc:.2f}%, Sequence Accuracy: {seq_acc:.2f}%')
+    return seq_acc
 
 def main():
     # Set device
@@ -283,8 +343,8 @@ def main():
     # set all hyper-parameters
     batch_size = 128
     lr = 3e-4
-    num_epochs = 30
-    img_width = 28
+    num_epochs = 3
+    img_width = 56
     img_channels = 1
     num_classes = 10
     patch_size = 14
@@ -295,8 +355,6 @@ def main():
     weight_decay = 1e-4
     drop_rate = 0.1
     n_digit = 4 # numer of digits in each image
-
-    
 
 
     # ### load in the original MNIST dataset, where each image contains one digit
