@@ -22,17 +22,17 @@ SWEEP_CONFIG = {
     },
     'parameters': {
         'batch_size': {
-            'values': [64 128]
+            'values': [64,128]
         },
         'num_epochs':{
-            'values': [5,10,20,30]
-        }
+            'values': [10,20,40]
+        },
         'num_heads':{
             'values': [4,8,16]
-        }
+        },
         'num_layers':{
             'values': [2,4,8]
-        }
+        },
         'learning_rate': {
             'min': 1e-5,
             'max': 1e-2,
@@ -42,7 +42,7 @@ SWEEP_CONFIG = {
             'min': 1e-6,
             'max': 1e-2,
             'distribution': 'log_uniform'
-        }
+        },
         'drop_rate': {
             'min': 0.1,
             'max': 0.5,
@@ -56,37 +56,57 @@ def train_sweep_run():
     Single training run for wandb sweep.
     This function is called by the sweep agent for each hyperparameter combination.
     """
+    import torch
+    from prepare_dataset import Combine
+    from mnist_transformer import ViT, evaluate_model
+
     # Initialize wandb run
     wandb.init()
     
     try:
         config = wandb.config
-        
         print(f"\n🚀 Starting sweep run")
 
-        results = train_model(
-            model_parameters=ModelHyperparameters(
-                hidden_dimensions=[config.hidden_dim_1, config.hidden_dim_2, config.hidden_dim_3],
-                include_batch_norms=config.include_batch_norms,
-            ),
-            training_parameters=TrainingHyperparameters(
-                batch_size=config.batch_size,
-                epochs=config.epochs,
-                learning_rate=config.learning_rate,
-                freeze_embeddings=config.freeze_embeddings,
-                dropout=config.dropout,
-            ),
+        # Build dataclasses from wandb.config, using defaults for missing values
+        train_cfg = TrainingHyperparameters(
+            batch_size = config.batch_size,
+            num_epochs = config.num_epochs,
+            learning_rate = config.learning_rate,
+            weight_decay = config.weight_decay,
+            drop_rate = config.drop_rate
         )
-        
-        # Log final metrics (wandb.log is also called within train_model)
-        wandb.log({
-            "final_train_loss": results['final_train_loss'],
-            "final_test_loss": results['final_test_loss'],
-            "best_test_loss": results['best_test_loss'],
-            "epochs_completed": results['epochs_completed']
-        })
-        
-        print(f"✅ Sweep run completed! Test loss: {results['final_test_loss']:.4f}")
+        model_cfg = ModelHyperparameters(
+            num_heads = config.num_heads,
+            num_layers = config.num_layers
+            # Other model parameters can use defaults or be added to SWEEP_CONFIG if you want to sweep them
+        )
+
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # Data
+        train_dataset = Combine(train=True)
+        test_dataset = Combine(train=False)
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True)
+        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1000, shuffle=False)
+
+        # Update model_cfg with dataset info
+        tmp = next(iter(train_dataset))
+        model_cfg.img_width = tmp[0].shape[0]
+        model_cfg.img_channels = 1
+        model_cfg.patch_size = tmp[1].shape[1]
+
+        # Model, optimizer, loss
+        model = ViT(model_cfg, train_cfg).to(device)
+        criterion = torch.nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
+
+        # Training loop
+        for epoch in range(train_cfg.num_epochs):
+            train_model(model, train_loader, criterion, optimizer, device)
+            seq_acc = evaluate_model(model, test_loader, device)
+            wandb.log({'epoch': epoch, 'sequence_accuracy': seq_acc})
+
+        print(f"✅ Sweep run completed!")
         
     except Exception as e:
         print(f"❌ Sweep run failed: {e}")

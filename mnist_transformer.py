@@ -15,7 +15,7 @@ torch.manual_seed(42)
 @dataclass
 class TrainingHyperparameters:
     batch_size: int = 128
-    num_epochs: int = 3
+    num_epochs: int = 10
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     drop_rate: float = 0.1
