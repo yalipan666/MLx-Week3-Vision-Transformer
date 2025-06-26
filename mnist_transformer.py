@@ -27,7 +27,6 @@ class ModelHyperparameters:
     num_classes: int = 10
     patch_size: int = 14
     embed_dim: int = 160
-    ff_dim: int = 2048
     num_heads: int = 4
     num_layers: int = 3
     n_digit: int = 4
