@@ -14,7 +14,7 @@ torch.manual_seed(42)
 # pre-set all the relevant parameters
 @dataclass
 class TrainingHyperparameters:
-    batch_size: int = 128
+    batch_size: int = 64
     num_epochs: int = 5
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
@@ -25,8 +25,8 @@ class ModelHyperparameters:
     img_width: int = 280
     img_channels: int = 1
     num_classes: int = 10
-    patch_size: int = 14
-    embed_dim: int = 1028
+    patch_size: int = 28
+    embed_dim: int = 128
     num_heads: int = 4
     num_layers: int = 3
     n_digit: int = 10
@@ -321,6 +321,7 @@ def train_model(model, train_loader, criterion, optimizer, device, model_cfg):
             running_loss = 0.0
             correct_tokens = 0
             total_tokens = 0
+        torch.cuda.empty_cache()
 
 def evaluate_model(model, test_loader, device, model_cfg):
     model.eval()
