@@ -9,3 +9,4 @@ streamlit-drawable-canvas>=0.9.3
 matplotlib>=3.8.0
 einops>=0.8.0
 wandb>=0.20.1
+tqdm>=4.67.1

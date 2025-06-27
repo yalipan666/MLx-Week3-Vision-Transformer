@@ -86,7 +86,7 @@ class RandomDigitsOnCanvas(torch.utils.data.Dataset):
         canvas_tensor = self.tf(canvas)
         canvas_tensor = self.normalize(canvas_tensor)
 
-        print(f"Requested: {n_digits}, Placed: {len(digit_infos)}")
+        # print(f"Requested: {n_digits}, Placed: {len(digit_infos)}")
 
         return canvas_tensor, torch.tensor(label, dtype=torch.long)
 

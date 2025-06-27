@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 from RandomDigitsOnCanvas import RandomDigitsOnCanvas
@@ -15,7 +15,7 @@ torch.manual_seed(42)
 @dataclass
 class TrainingHyperparameters:
     batch_size: int = 128
-    num_epochs: int = 20
+    num_epochs: int = 5
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     drop_rate: float = 0.2
@@ -279,7 +279,7 @@ def generate_mask(sz):
     return mask
 
 
-def train_model(model, train_loader, criterion, optimizer, device):
+def train_model(model, train_loader, criterion, optimizer, device, model_cfg):
     model.train()
     running_loss = 0.0
     total_tokens = 0
@@ -322,7 +322,7 @@ def train_model(model, train_loader, criterion, optimizer, device):
             correct_tokens = 0
             total_tokens = 0
 
-def evaluate_model(model, test_loader, device):
+def evaluate_model(model, test_loader, device, model_cfg):
     model.eval()
     total_seqs = 0
     correct_seqs = 0
@@ -352,34 +352,69 @@ def evaluate_model(model, test_loader, device):
     print(f'Test Token Accuracy: {token_acc:.2f}%, Sequence Accuracy: {seq_acc:.2f}%')
     return seq_acc
 
+class SyntheticMNISTSequenceDataset(Dataset):
+    """
+    Loads synthetic MNIST images and variable-length digit sequences, pads them to n_digit,
+    and adds start/end tokens for transformer training.
+    """
+    def __init__(self, pt_path, n_digit, start_token, end_token, padding_token):
+        super().__init__()
+        data = torch.load(pt_path)
+        self.images = data[0]  # shape: [N, 1, H, W]
+        self.labels = data[1]  # list of 1D tensors (variable length)
+        self.n_digit = n_digit
+        self.start_token = start_token
+        self.end_token = end_token
+        self.padding_token = padding_token
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        img = self.images[idx]
+        label = self.labels[idx]
+        # Pad label to n_digit
+        label = label[:self.n_digit]  # truncate if too long
+        pad_len = self.n_digit - len(label)
+        if pad_len > 0:
+            label = torch.cat([label, torch.full((pad_len,), self.padding_token, dtype=torch.long)])
+        # Add start and end tokens
+        label = torch.cat([
+            torch.tensor([self.start_token], dtype=torch.long),
+            label,
+            torch.tensor([self.end_token], dtype=torch.long)
+        ])  # shape: [n_digit + 2]
+        return img, label
+
 def main():
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
 
-    # ### load in the original MNIST dataset, where each image contains one digit
-    # # Load and preprocess data
-    # transform = transforms.Compose([
-    #     transforms.ToTensor(),
-    #     transforms.Normalize((0.1307,), (0.3081,))
-    #  ])
-    # train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-    # test_dataset = datasets.MNIST('./data', train=False, transform=transform)
-    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    # test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
-
     # loadin the config
     train_cfg = TrainingHyperparameters()
     model_cfg = ModelHyperparameters()
 
-    # ### load in the customed dataset, where each image contains 4 digits in 4 quarants
-    train_dataset = RandomDigitsOnCanvas(train=True)
-    test_dataset = RandomDigitsOnCanvas(train=False)
+    # Use the synthetic datasets
+    train_dataset = SyntheticMNISTSequenceDataset(
+        pt_path='synthetic_mnist_train.pt',
+        n_digit=model_cfg.n_digit,
+        start_token=model_cfg.num_classes,
+        end_token=model_cfg.num_classes + 1,
+        padding_token=model_cfg.padding_token
+    )
+    test_dataset = SyntheticMNISTSequenceDataset(
+        pt_path='synthetic_mnist_test.pt',
+        n_digit=model_cfg.n_digit,
+        start_token=model_cfg.num_classes,
+        end_token=model_cfg.num_classes + 1,
+        padding_token=model_cfg.padding_token
+    )
     train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 
     # get the image dimension
-    tmp = next(iter(train_dataset))
+    tmp = train_dataset[0]
     model_cfg.img_width = tmp[0].shape[1]  # canvas_tensor shape: (1, H, W)
     model_cfg.img_channels = 1
     model_cfg.patch_size = 14  # or set as needed
@@ -393,8 +428,8 @@ def main():
     print('Starting training...')
     for epoch in range(train_cfg.num_epochs):
         print(f'\nEpoch {epoch + 1}/{train_cfg.num_epochs}')
-        train_model(model, train_loader, criterion, optimizer, device)
-        evaluate_model(model, test_loader, device)
+        train_model(model, train_loader, criterion, optimizer, device, model_cfg)
+        evaluate_model(model, test_loader, device, model_cfg)
 
     # Save the trained model
     torch.save(model.state_dict(), 'mnist_transformer_model.pth')
