@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-WORKDIR /app
+WORKDIR /appnew
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY mnist_transformer.py .
-COPY prepare_dataset.py .
+COPY random_digits_on_canvas.py .
 COPY app.py .
 COPY db_utils.py .
 COPY mnist_transformer_model.pth .

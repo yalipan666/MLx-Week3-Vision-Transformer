@@ -11,6 +11,7 @@ from db_utils import (
 import torchvision.transforms as transforms
 from streamlit_drawable_canvas import st_canvas
 import io
+from random_digits_on_canvas import RandomDigitsOnCanvas
 
 # Initialize the model
 @st.cache_resource
@@ -92,8 +93,8 @@ def main():
             # Preprocess image
             input_img = preprocess_image(image,img_size)  # (1, 1, 56, 56)
             from mnist_transformer import patchify
-            patches = patchify(input_img, patch_size)    # (1, 1, 4, 4, 14, 14)
-            patches = patches.reshape(1, n_patches, patch_size, patch_size)  # (1, 16, 14, 14)
+            patches = patchify(input_img, patch_size)
+            patches = patches.reshape(1, n_patches, patch_size, patch_size)
             device = torch.device('cpu')
             
             # Get prediction (sequence)
