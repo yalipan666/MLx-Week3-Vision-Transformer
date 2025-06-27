@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
-from prepare_dataset import Combine
+from RandomDigitsOnCanvas import RandomDigitsOnCanvas
 from dataclasses import dataclass
 
 
@@ -22,14 +22,15 @@ class TrainingHyperparameters:
 
 @dataclass
 class ModelHyperparameters:
-    img_width: int = 56
+    img_width: int = 280
     img_channels: int = 1
     num_classes: int = 10
     patch_size: int = 14
-    embed_dim: int = 160
+    embed_dim: int = 1028
     num_heads: int = 4
     num_layers: int = 3
-    n_digit: int = 4
+    n_digit: int = 10
+    padding_token: int = 12  # Add a padding token index
 
 # Define the encoder architecture
 class ViT(nn.Module):
@@ -57,18 +58,20 @@ class ViT(nn.Module):
     
         #### building the decoder
         # +2 for start and end tokens
-        self.emb_output = nn.Embedding(model_cfg.num_classes+2, model_cfg.embed_dim)
+        vocab_size = model_cfg.num_classes + 3  # 10 digits + start + end + padding
+        self.emb_output = nn.Embedding(vocab_size, model_cfg.embed_dim, padding_idx=model_cfg.padding_token)
         self.pos_output = nn.Embedding(model_cfg.n_digit+2, model_cfg.embed_dim)
         self.register_buffer('rng_output', torch.arange(model_cfg.n_digit+2))
         self.dec = nn.ModuleList([DecoderLayer(model_cfg.embed_dim, model_cfg.num_heads, train_cfg.drop_rate) for _ in range(model_cfg.num_layers)])
         self.fin_output = nn.Sequential(
             nn.LayerNorm(model_cfg.embed_dim),
-            nn.Linear(model_cfg.embed_dim, model_cfg.num_classes+2)
+            nn.Linear(model_cfg.embed_dim, vocab_size)
         )
         self.n_digit = model_cfg.n_digit
         self.num_classes = model_cfg.num_classes
         self.start_token = model_cfg.num_classes
         self.end_token = model_cfg.num_classes + 1
+        self.padding_token = model_cfg.padding_token
 
     def forward(self, x, y):
         # flatten the patch matrix into a vector, also stack together all patches
@@ -281,48 +284,40 @@ def train_model(model, train_loader, criterion, optimizer, device):
     running_loss = 0.0
     total_tokens = 0
     correct_tokens = 0
-    for batch_idx, combine_data in enumerate(train_loader):
-        # ### try to get one data exaple
-        # data_iter = iter(train_loader)
-        # data,target = next(data_iter)
-        data = combine_data[1]  # [batch, np, ph, pw]
-        target = combine_data[2]  # [batch, seq_len] (with start and end tokens)
+    for batch_idx, batch in enumerate(train_loader):
+        canvas = batch[0]  # [batch, 1, H, W]
+        target = batch[1]  # [batch, seq_len]
+        # Patchify the canvas images
+        data = patchify(canvas, model_cfg.patch_size)  # [batch, 1, nh, nw, ph, pw]
+        b, c, nh, nw, ph, pw = data.shape
+        data = data.reshape(b, c, nh * nw, ph, pw)  # [batch, 1, n_patches, ph, pw]
+        data = data.squeeze(1)  # [batch, n_patches, ph, pw]
         data, target = data.to(device), target.to(device)
-        # data.shape = [64, 1, 28, 28] #tensor: [batch_size,channels,height,width]
-        # target is a tensor of shape [64]
-        input_seq = target[:,:-1]
-        target_seq = target[:,1:] # shift towards right by one token
+        # Pad target to max length in batch
+        max_len = target.size(1)
+        input_seq = target[:, :-1]
+        target_seq = target[:, 1:]
         # ### try to plot a random image to have a peek
         # img = data[0].cpu().squeeze()
         # plt.imshow(img, cmap='gray')
         # plt.show()
         
-        ## patchify the image into a grid (in order to implement vision transformer)
-        # data = patchify(data,patch_size) #[64,1,4,4,7,7]
-        # ### try to check on the pathify
-        # img_patches = patches[0,0]
-        # fig,axes = plt.subplots(4,4,figsize=(7,7))
-        # for i in range (4):
-        #     for j in range(4):
-        #         axes[i,j].imshow(img_patches[i,j],cmap='gray')
-        #         axes[i,j].axis('off')
-        # plt.show() 
-        
         optimizer.zero_grad()
         output = model(data, input_seq)  # output: [batch, seq_len, vocab_size]
-        # Reshape for loss: flatten batch and seq
         output = output.reshape(-1, output.size(-1))
         target_seq = target_seq.reshape(-1)
+        # Use ignore_index for padding
         loss = criterion(output, target_seq)
         loss.backward()
         optimizer.step()
         running_loss += loss.item()
-        # Token-level accuracy
+        # Token-level accuracy (ignore padding)
         pred_tokens = output.argmax(dim=-1)
-        correct_tokens += (pred_tokens == target_seq).sum().item()
-        total_tokens += target_seq.numel()
+        mask = (target_seq != model_cfg.padding_token)
+        correct_tokens += ((pred_tokens == target_seq) & mask).sum().item()
+        total_tokens += mask.sum().item()
         if batch_idx % 100 == 99:
-            print(f'Batch: {batch_idx + 1}, Loss: {running_loss/100:.3f}, Token Accuracy: {100.*correct_tokens/total_tokens:.2f}%')
+            print(f'Batch: {batch_idx + 1}, Loss: {running_loss/100:.3f}, Token Accuracy: {100.*correct_tokens/max(total_tokens,1):.2f}%')
             running_loss = 0.0
             correct_tokens = 0
             total_tokens = 0
@@ -334,26 +329,26 @@ def evaluate_model(model, test_loader, device):
     total_tokens = 0
     correct_tokens = 0
     with torch.no_grad():
-        for combine_data in test_loader:
-            data = combine_data[1]
-            target = combine_data[2]
+        for batch in test_loader:
+            canvas = batch[0]
+            target = batch[1]
+            data = patchify(canvas, model_cfg.patch_size)
+            b, c, nh, nw, ph, pw = data.shape
+            data = data.reshape(b, c, nh * nw, ph, pw)
+            data = data.squeeze(1)
             data, target = data.to(device), target.to(device)
-            # Remove start token for comparison
             target_seq = target[:, 1:]
-            # Generate predictions
             pred_seq = model.autoregressive_inference(data, device, max_digits=target_seq.size(1))
-            # Pad to same length for comparison
             min_len = min(target_seq.size(1), pred_seq.size(1))
             target_trim = target_seq[:, :min_len]
             pred_trim = pred_seq[:, :min_len]
-            # Token-level accuracy
-            correct_tokens += (pred_trim == target_trim).sum().item()
-            total_tokens += target_trim.numel()
-            # Sequence-level accuracy (all tokens must match)
-            correct_seqs += ((pred_trim == target_trim).all(dim=1)).sum().item()
+            mask = (target_trim != model_cfg.padding_token)
+            correct_tokens += ((pred_trim == target_trim) & mask).sum().item()
+            total_tokens += mask.sum().item()
+            correct_seqs += (((pred_trim == target_trim) | ~mask).all(dim=1)).sum().item()
             total_seqs += target_seq.size(0)
-    token_acc = 100. * correct_tokens / total_tokens if total_tokens>0 else 0.0
-    seq_acc = 100. * correct_seqs / total_seqs if total_seqs>0 else 0.0
+    token_acc = 100. * correct_tokens / max(total_tokens,1)
+    seq_acc = 100. * correct_seqs / max(total_seqs,1)
     print(f'Test Token Accuracy: {token_acc:.2f}%, Sequence Accuracy: {seq_acc:.2f}%')
     return seq_acc
 
@@ -367,7 +362,7 @@ def main():
     # transform = transforms.Compose([
     #     transforms.ToTensor(),
     #     transforms.Normalize((0.1307,), (0.3081,))
-    # ])
+    #  ])
     # train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
     # test_dataset = datasets.MNIST('./data', train=False, transform=transform)
     # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -378,20 +373,20 @@ def main():
     model_cfg = ModelHyperparameters()
 
     # ### load in the customed dataset, where each image contains 4 digits in 4 quarants
-    train_dataset = Combine(train=True)
-    test_dataset = Combine(train=False)
+    train_dataset = RandomDigitsOnCanvas(train=True)
+    test_dataset = RandomDigitsOnCanvas(train=False)
     train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
 
     # get the image dimension
     tmp = next(iter(train_dataset))
-    model_cfg.img_width = tmp[0].shape[0]
+    model_cfg.img_width = tmp[0].shape[1]  # canvas_tensor shape: (1, H, W)
     model_cfg.img_channels = 1
-    model_cfg.patch_size = tmp[1].shape[1]
+    model_cfg.patch_size = 14  # or set as needed
 
     # Initialize model, loss function, and optimizer
     model = ViT(model_cfg, train_cfg).to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(ignore_index=model_cfg.padding_token)
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
 
     # Training loop

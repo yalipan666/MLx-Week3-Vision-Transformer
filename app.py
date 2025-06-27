@@ -24,7 +24,7 @@ def load_model():
 
 def preprocess_image(image,img_size):
     image = image.convert('L')
-    image = image.resize((img_size, img_size))
+    image = image.resize((img_size, img_size),resample=Image.NEAREST)
     transform = transforms.Compose([
         transforms.ToTensor(),  # (1, 56, 56)
         transforms.Normalize((0.1307,), (0.3081,))
@@ -57,8 +57,8 @@ def main():
     model = load_model()
 
     # set parameters
-    img_size = 56 # image size for resize the canvas
-    patch_size = 14 # patch_size for each patch of the image
+    img_size = 280 # image size for resize the canvas
+    patch_size = 28 # patch_size for each patch of the image
     n_patches = (img_size//patch_size)**2
             
     # Create two columns: left for canvas, right for input/results
@@ -71,8 +71,8 @@ def main():
             stroke_width=10,
             stroke_color="white",
             background_color="black",
-            width=500,
-            height=500,
+            width=560,
+            height=560,
             drawing_mode="freedraw",
             key="canvas",
         )
