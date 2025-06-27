@@ -3,6 +3,7 @@ import torchvision as tv
 import numpy as np
 from PIL import Image
 import random
+from tqdm import tqdm
 
 class RandomDigitsOnCanvas(torch.utils.data.Dataset):
     def __init__(self, train=True, canvas_size=280, min_digits=1, max_digits=10):
@@ -47,7 +48,7 @@ class RandomDigitsOnCanvas(torch.utils.data.Dataset):
                 y = random.randint(0, self.canvas_size - h)
                 overlap_area = np.sum(mask[y:y+h, x:x+w] & (digit_np > 0))
                 digit_area = np.sum(digit_np > 0)
-                if digit_area == 0 or overlap_area / digit_area <= 0.05:
+                if digit_area == 0 or overlap_area / digit_area <= 0.0005:
                     # Place digit
                     canvas.paste(Image.fromarray(digit_np), (x, y))
                     mask[y:y+h, x:x+w] = np.maximum(mask[y:y+h, x:x+w], (digit_np > 0).astype(np.uint8))
@@ -65,7 +66,7 @@ class RandomDigitsOnCanvas(torch.utils.data.Dataset):
             current_row = []
             row_start_y = digit_infos[0]['y']
             for d in digit_infos:
-                if abs(d['y'] - row_start_y) > 20:
+                if abs(d['y'] - row_start_y) > 28:
                     # Sort the current row by x (left to right) before appending
                     current_row.sort(key=lambda d: d['x'])
                     rows.append(current_row)
@@ -91,11 +92,37 @@ class RandomDigitsOnCanvas(torch.utils.data.Dataset):
 
 # Example usage:
 if __name__ == "__main__":
-    ds = RandomDigitsOnCanvas(train=True)
+    # Generate and save synthetic training and test datasets
+    train_size = 60000
+    test_size = 10000
+    canvas_size = 280
+    print("Generating synthetic training set...")
+    train_ds = RandomDigitsOnCanvas(train=True, canvas_size=canvas_size)
+    train_images = torch.zeros((train_size, 1, canvas_size, canvas_size), dtype=torch.float32)
+    train_labels = []
+    for i in tqdm(range(train_size)):
+        img, lbl = train_ds[i]
+        train_images[i] = img
+        train_labels.append(lbl)
+    torch.save((train_images, train_labels), "synthetic_mnist_train.pt")
+    print("Saved synthetic_mnist_train.pt")
+
+    print("Generating synthetic test set...")
+    test_ds = RandomDigitsOnCanvas(train=False, canvas_size=canvas_size)
+    test_images = torch.zeros((test_size, 1, canvas_size, canvas_size), dtype=torch.float32)
+    test_labels = []
+    for i in tqdm(range(test_size)):
+        img, lbl = test_ds[i]
+        test_images[i] = img
+        test_labels.append(lbl)
+    torch.save((test_images, test_labels), "synthetic_mnist_test.pt")
+    print("Saved synthetic_mnist_test.pt")
+
+    # Optionally, show a grid of samples
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(4, 4, figsize=(10, 10))
     for i in range(16):
-        img, lbl = ds[i]
+        img, lbl = train_ds[i]
         ax = axes[i // 4, i % 4]
         ax.imshow(img.squeeze().numpy(), cmap='gray')
         ax.set_title(f"Label: {lbl.tolist()}", fontsize=8)
