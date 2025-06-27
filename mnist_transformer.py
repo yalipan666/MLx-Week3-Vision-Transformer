@@ -14,11 +14,11 @@ torch.manual_seed(42)
 # pre-set all the relevant parameters
 @dataclass
 class TrainingHyperparameters:
-    batch_size: int = 64
-    num_epochs: int = 5
+    batch_size: int = 160
+    num_epochs: int = 10
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
-    drop_rate: float = 0.2
+    drop_rate: float = 0.1
 
 @dataclass
 class ModelHyperparameters:
@@ -26,9 +26,9 @@ class ModelHyperparameters:
     img_channels: int = 1
     num_classes: int = 10
     patch_size: int = 28
-    embed_dim: int = 128
-    num_heads: int = 4
-    num_layers: int = 3
+    embed_dim: int = 192
+    num_heads: int = 6
+    num_layers: int = 4
     n_digit: int = 10
     padding_token: int = 12  # Add a padding token index
 
@@ -109,8 +109,7 @@ class ViT(nn.Module):
         
         # get the finnal prediction
         logits = self.fin_output(tgt)
-        out = torch.softmax(logits, dim=-1)
-        return out
+        return logits
 
     # build the generation task where the model predict the token/digit one by one
     def autoregressive_inference(self, x, device, max_digits=None): 
@@ -423,7 +422,7 @@ def main():
     # Initialize model, loss function, and optimizer
     model = ViT(model_cfg, train_cfg).to(device)
     criterion = nn.CrossEntropyLoss(ignore_index=model_cfg.padding_token)
-    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=train_cfg.learning_rate, weight_decay=train_cfg.weight_decay)
 
     # Training loop
     print('Starting training...')
